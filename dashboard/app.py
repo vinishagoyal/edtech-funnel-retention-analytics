@@ -571,8 +571,8 @@ def main() -> None:
     kpi_cols[1].metric("ARPPU", format_inr(row["arppu"]))
     kpi_cols[2].metric("Avg Rating", metric_value(float(row["avg_rating"])))
 
-    tab_overview, tab_funnel, tab_retention, tab_supply, tab_revenue = st.tabs(
-        ["Overview", "Funnel", "Retention", "Supply & Quality", "Revenue"]
+    tab_overview, tab_details, tab_funnel, tab_retention, tab_supply, tab_revenue = st.tabs(
+        ["Overview", "Metric Details", "Funnel", "Retention", "Supply & Quality", "Revenue"]
     )
 
     with tab_overview:
@@ -642,6 +642,86 @@ def main() -> None:
             """,
             unsafe_allow_html=True,
         )
+
+    with tab_details:
+        st.subheader("Signed-up Users")
+        signed_up_detail = signed_up_breakdown.copy()
+        signed_up_detail["Share"] = (
+            100.0 * signed_up_detail["signed_up_users"] / signed_up_detail["signed_up_users"].sum()
+        ).round(2)
+        signed_up_chart = signed_up_detail.sort_values("signed_up_users", ascending=True)
+        fig = px.bar(
+            signed_up_chart,
+            x="signed_up_users",
+            y="acquisition_channel",
+            orientation="h",
+            text="signed_up_users",
+            title="Signed-up Users by Acquisition Channel",
+            color_discrete_sequence=["#2f80ed"],
+        )
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        fig.update_layout(margin=dict(l=160, r=50, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=390), use_container_width=True)
+        signed_up_table = signed_up_detail.rename(
+            columns={"acquisition_channel": "Channel", "signed_up_users": "Signed-up Users"}
+        )
+        signed_up_table["Share"] = signed_up_table["Share"].map(lambda value: f"{value:.1f}%")
+        st.dataframe(signed_up_table, use_container_width=True, hide_index=True)
+        top_channel = signed_up_detail.iloc[0]
+        st.info(
+            f"{top_channel['acquisition_channel']} is the largest signed-up user source with "
+            f"{int(top_channel['signed_up_users']):,} users."
+        )
+
+        st.divider()
+        st.subheader("Completed Sessions")
+        session_detail = session_status_breakdown.copy()
+        session_detail["Status"] = session_detail["session_status"].map(clean_label)
+        session_detail["Share"] = (100.0 * session_detail["sessions"] / session_detail["sessions"].sum()).round(2)
+        session_chart = session_detail.sort_values("sessions", ascending=True)
+        fig = px.bar(
+            session_chart,
+            x="sessions",
+            y="Status",
+            orientation="h",
+            text="sessions",
+            title="Sessions by Status",
+            color_discrete_sequence=["#27ae60"],
+        )
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        fig.update_layout(margin=dict(l=190, r=50, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=340), use_container_width=True)
+        session_table = session_detail[["Status", "sessions", "Share"]].rename(columns={"sessions": "Sessions"})
+        session_table["Share"] = session_table["Share"].map(lambda value: f"{value:.1f}%")
+        st.dataframe(session_table, use_container_width=True, hide_index=True)
+        completed_share = session_detail.loc[session_detail["session_status"] == "completed", "Share"]
+        if not completed_share.empty:
+            st.info(f"Completed sessions account for {completed_share.iloc[0]:.1f}% of all sessions.")
+
+        st.divider()
+        st.subheader("Total Revenue")
+        revenue_detail = plan_revenue.copy()
+        revenue_detail["Plan"] = revenue_detail["plan_type"].map(clean_label)
+        revenue_detail["Share"] = (100.0 * revenue_detail["revenue"] / revenue_detail["revenue"].sum()).round(2)
+        revenue_chart = revenue_detail.sort_values("revenue", ascending=True)
+        fig = px.bar(
+            revenue_chart,
+            x="revenue",
+            y="Plan",
+            orientation="h",
+            text="revenue",
+            title="Revenue by Plan",
+            color_discrete_sequence=["#27ae60"],
+        )
+        fig.update_traces(texttemplate="INR %{text:,.0f}", textposition="outside", cliponaxis=False)
+        fig.update_layout(margin=dict(l=110, r=80, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=320), use_container_width=True)
+        revenue_table = revenue_detail[["Plan", "revenue", "Share"]].rename(columns={"revenue": "Revenue"})
+        revenue_table["Revenue"] = revenue_table["Revenue"].map(format_inr)
+        revenue_table["Share"] = revenue_table["Share"].map(lambda value: f"{value:.1f}%")
+        st.dataframe(revenue_table, use_container_width=True, hide_index=True)
+        top_plan = revenue_detail.iloc[0]
+        st.info(f"{top_plan['Plan']} is the largest revenue plan at {format_inr(top_plan['revenue'])}.")
 
     with tab_funnel:
         funnel_chart = funnel.copy()
