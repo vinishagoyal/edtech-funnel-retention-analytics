@@ -471,7 +471,6 @@ def main() -> None:
     except SQLAlchemyError:
         try:
             data = load_csv_dashboard_data()
-            st.info("PostgreSQL is not reachable, so this dashboard is using generated CSV files.")
         except FileNotFoundError as exc:
             st.error("Could not connect to PostgreSQL, and generated CSV files are missing.")
             st.code(
