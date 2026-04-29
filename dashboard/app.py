@@ -39,12 +39,16 @@ st.markdown(
         div[data-testid="stMetricLabel"] {
             color: #475569;
         }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.45rem;
+        }
         .insight-box {
             border: 1px solid #e5e7eb;
             border-radius: 8px;
             padding: 14px 16px;
             background: #f8fafc;
-            min-height: 112px;
+            min-height: 88px;
+            margin-bottom: 10px;
         }
         .insight-box strong {
             color: #0f172a;
@@ -85,19 +89,24 @@ def format_inr(value: float | int) -> str:
     return f"INR {value:,.0f}"
 
 
-def style_chart(fig: go.Figure, height: int = 390) -> go.Figure:
+def style_chart(fig: go.Figure, height: int = 430) -> go.Figure:
     fig.update_layout(
         height=height,
-        margin=dict(l=10, r=10, t=54, b=20),
+        margin=dict(l=20, r=20, t=56, b=36),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        font=dict(color="#0f172a"),
-        title_font=dict(size=17),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        font=dict(color="#0f172a", size=13),
+        title_font=dict(size=18),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="left", x=0),
+        coloraxis_showscale=False,
     )
     fig.update_xaxes(showgrid=False, title=None)
     fig.update_yaxes(gridcolor="#e5e7eb", title=None)
     return fig
+
+
+def clean_label(value: str) -> str:
+    return value.replace("_", " ").title()
 
 
 def conversion_frame(stages: list[tuple[str, int]]) -> pd.DataFrame:
@@ -499,51 +508,60 @@ def main() -> None:
         st.write("Refresh cache every 5 minutes")
 
     st.subheader("Executive Summary")
-    kpi_cols = st.columns(6)
+    kpi_cols = st.columns(3)
     kpi_cols[0].metric("Activation", metric_value(float(row["activation_rate"]), "%"))
     kpi_cols[1].metric("Completion", metric_value(float(row["session_completion_rate"]), "%"))
     kpi_cols[2].metric("Repeat Usage", metric_value(float(row["repeat_usage_rate"]), "%"))
-    kpi_cols[3].metric("Paid Conversion", metric_value(float(row["paid_conversion_rate"]), "%"))
-    kpi_cols[4].metric("ARPPU", format_inr(row["arppu"]))
-    kpi_cols[5].metric("Avg Rating", metric_value(float(row["avg_rating"])))
+    kpi_cols = st.columns(3)
+    kpi_cols[0].metric("Paid Conversion", metric_value(float(row["paid_conversion_rate"]), "%"))
+    kpi_cols[1].metric("ARPPU", format_inr(row["arppu"]))
+    kpi_cols[2].metric("Avg Rating", metric_value(float(row["avg_rating"])))
 
     tab_overview, tab_funnel, tab_retention, tab_supply, tab_revenue = st.tabs(
         ["Overview", "Funnel", "Retention", "Supply & Quality", "Revenue"]
     )
 
     with tab_overview:
-        c1, c2 = st.columns([1.25, 1])
-        with c1:
-            trend_long = event_trend.melt(
-                id_vars="event_week",
-                value_vars=["app_opens", "questions_submitted", "sessions_completed", "payments_completed"],
-                var_name="event_type",
-                value_name="events",
-            )
-            fig = px.line(
-                trend_long,
-                x="event_week",
-                y="events",
-                color="event_type",
-                markers=True,
-                title="Weekly Product Activity",
-                color_discrete_sequence=px.colors.qualitative.Set2,
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
-        with c2:
-            fig = px.bar(
-                acquisition,
-                x="users",
-                y="acquisition_channel",
-                orientation="h",
-                color="signup_rate",
-                title="Acquisition Mix and Signup Rate",
-                color_continuous_scale="Teal",
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
+        trend_long = event_trend.melt(
+            id_vars="event_week",
+            value_vars=["app_opens", "questions_submitted", "sessions_completed", "payments_completed"],
+            var_name="event_type",
+            value_name="events",
+        )
+        trend_long["event_type"] = trend_long["event_type"].map(
+            {
+                "app_opens": "App Opens",
+                "questions_submitted": "Questions",
+                "sessions_completed": "Sessions",
+                "payments_completed": "Payments",
+            }
+        )
+        fig = px.line(
+            trend_long,
+            x="event_week",
+            y="events",
+            color="event_type",
+            markers=True,
+            title="Weekly Activity",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        st.plotly_chart(style_chart(fig, height=460), use_container_width=True)
 
-        i1, i2, i3 = st.columns(3)
-        i1.markdown(
+        acquisition_chart = acquisition.sort_values("users", ascending=True)
+        fig = px.bar(
+            acquisition_chart,
+            x="users",
+            y="acquisition_channel",
+            orientation="h",
+            text="users",
+            title="Acquisition Mix",
+            color_discrete_sequence=["#2f80ed"],
+        )
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        fig.update_layout(margin=dict(l=150, r=40, t=56, b=32))
+        st.plotly_chart(style_chart(fig, height=390), use_container_width=True)
+
+        st.markdown(
             """
             <div class="insight-box">
             <strong>Primary value moment</strong><br>
@@ -552,7 +570,7 @@ def main() -> None:
             """,
             unsafe_allow_html=True,
         )
-        i2.markdown(
+        st.markdown(
             """
             <div class="insight-box">
             <strong>Operational lever</strong><br>
@@ -561,7 +579,7 @@ def main() -> None:
             """,
             unsafe_allow_html=True,
         )
-        i3.markdown(
+        st.markdown(
             """
             <div class="insight-box">
             <strong>Monetization timing</strong><br>
@@ -572,39 +590,37 @@ def main() -> None:
         )
 
     with tab_funnel:
-        c1, c2 = st.columns([1.35, 1])
-        with c1:
-            fig = px.funnel(
-                funnel,
-                x="user_count",
-                y="funnel_stage",
-                title="User Journey Funnel",
-                color="funnel_stage",
-                color_discrete_sequence=px.colors.qualitative.Safe,
+        funnel_chart = funnel.copy()
+        funnel_chart["stage_label"] = funnel_chart["funnel_stage"].map(clean_label)
+        fig = px.funnel(
+            funnel_chart,
+            x="user_count",
+            y="stage_label",
+            title="User Journey Funnel",
+            color_discrete_sequence=["#2f80ed"],
+        )
+        fig.update_layout(margin=dict(l=150, r=30, t=56, b=30), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=520), use_container_width=True)
+
+        funnel_table = funnel.rename(
+            columns={
+                "funnel_stage": "Stage",
+                "user_count": "Users",
+                "conversion_from_previous_stage": "From Previous %",
+                "conversion_from_signup": "From Signup %",
+            }
+        )
+        funnel_table["Stage"] = funnel_table["Stage"].map(clean_label)
+        st.dataframe(funnel_table, use_container_width=True, hide_index=True)
+        if len(funnel) > 1:
+            dropoffs = funnel.copy()
+            dropoffs["previous_users"] = dropoffs["user_count"].shift(1)
+            dropoffs["dropped_users"] = dropoffs["previous_users"] - dropoffs["user_count"]
+            largest_dropoff = dropoffs.iloc[1:].sort_values("dropped_users", ascending=False).iloc[0]
+            st.info(
+                f"Largest absolute drop-off: {int(largest_dropoff['dropped_users']):,} users before "
+                f"{clean_label(largest_dropoff['funnel_stage'])}."
             )
-            st.plotly_chart(style_chart(fig, height=470), use_container_width=True)
-        with c2:
-            st.dataframe(
-                funnel.rename(
-                    columns={
-                        "funnel_stage": "Stage",
-                        "user_count": "Users",
-                        "conversion_from_previous_stage": "From Previous %",
-                        "conversion_from_signup": "From Signup %",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-            if len(funnel) > 1:
-                dropoffs = funnel.copy()
-                dropoffs["previous_users"] = dropoffs["user_count"].shift(1)
-                dropoffs["dropped_users"] = dropoffs["previous_users"] - dropoffs["user_count"]
-                largest_dropoff = dropoffs.iloc[1:].sort_values("dropped_users", ascending=False).iloc[0]
-                st.info(
-                    f"Largest absolute drop-off: {int(largest_dropoff['dropped_users']):,} users before "
-                    f"{largest_dropoff['funnel_stage'].replace('_', ' ')}."
-                )
 
     with tab_retention:
         week_cols = ["week_0", "week_1", "week_2", "week_3", "week_4"]
@@ -614,92 +630,110 @@ def main() -> None:
             aspect="auto",
             color_continuous_scale="Greens",
             labels=dict(x="Signup Week", y="Retention Week", color="Retention %"),
-            title="Weekly Retention Cohorts",
+            title="Retention Cohorts",
             text_auto=".1f",
         )
         fig.update_yaxes(ticktext=["Week 0", "Week 1", "Week 2", "Week 3", "Week 4"], tickvals=week_cols)
-        st.plotly_chart(style_chart(fig, height=440), use_container_width=True)
+        fig.update_xaxes(tickangle=35)
+        st.plotly_chart(style_chart(fig, height=500), use_container_width=True)
         st.dataframe(retention, use_container_width=True, hide_index=True)
 
     with tab_supply:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            fig = px.bar(
-                subject,
-                x="subject",
-                y="total_questions",
-                title="Question Demand by Subject",
-                color="subject",
-                color_discrete_sequence=px.colors.qualitative.Pastel,
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
-        with c2:
-            fig = px.bar(
-                subject,
-                x="subject",
-                y="completion_rate",
-                title="Completion Rate by Subject",
-                color="completion_rate",
-                color_continuous_scale="Blues",
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
-        with c3:
-            fig = px.bar(
-                subject,
-                x="subject",
-                y="avg_rating",
-                title="Average Rating by Subject",
-                color="avg_rating",
-                color_continuous_scale="Greens",
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
+        subject_chart = subject.sort_values("total_questions", ascending=True)
+        fig = px.bar(
+            subject_chart,
+            x="total_questions",
+            y="subject",
+            orientation="h",
+            text="total_questions",
+            title="Question Demand by Subject",
+            color_discrete_sequence=["#2f80ed"],
+        )
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        fig.update_layout(margin=dict(l=100, r=40, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=370), use_container_width=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
-            fig = px.line(
-                wait_time,
-                x="wait_time_bucket",
-                y=["completion_rate", "abandonment_rate"],
-                markers=True,
-                title="Completion vs Abandonment by Wait Time",
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
-        with c2:
-            fig = px.bar(
-                churn.sort_values("users", ascending=True),
-                x="users",
-                y="churn_segment",
-                orientation="h",
-                title="Actionable Churn Segments",
-                color="users",
-                color_continuous_scale="Reds",
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
+        quality_chart = subject.sort_values("completion_rate", ascending=True)
+        fig = px.bar(
+            quality_chart,
+            x="completion_rate",
+            y="subject",
+            orientation="h",
+            text="completion_rate",
+            title="Completion Rate by Subject",
+            color_discrete_sequence=["#27ae60"],
+        )
+        fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
+        fig.update_xaxes(range=[0, 100])
+        fig.update_layout(margin=dict(l=100, r=40, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=370), use_container_width=True)
+
+        wait_chart = wait_time.melt(
+            id_vars="wait_time_bucket",
+            value_vars=["completion_rate", "abandonment_rate"],
+            var_name="metric",
+            value_name="rate",
+        )
+        wait_chart["metric"] = wait_chart["metric"].map(
+            {"completion_rate": "Completed", "abandonment_rate": "Abandoned"}
+        )
+        fig = px.line(
+            wait_chart,
+            x="wait_time_bucket",
+            y="rate",
+            color="metric",
+            markers=True,
+            title="Wait Time Impact",
+            color_discrete_sequence=["#27ae60", "#eb5757"],
+        )
+        fig.update_yaxes(range=[0, 100], ticksuffix="%")
+        st.plotly_chart(style_chart(fig, height=420), use_container_width=True)
+
+        churn_chart = churn.sort_values("users", ascending=True)
+        fig = px.bar(
+            churn_chart,
+            x="users",
+            y="churn_segment",
+            orientation="h",
+            text="users",
+            title="Churn Segments",
+            color_discrete_sequence=["#eb5757"],
+        )
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        fig.update_layout(margin=dict(l=240, r=40, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=380), use_container_width=True)
 
         st.dataframe(subject, use_container_width=True, hide_index=True)
 
     with tab_revenue:
-        c1, c2 = st.columns([1.2, 0.9])
-        with c1:
-            fig = px.bar(
-                payment,
-                x="acquisition_channel",
-                y="payment_conversion_rate",
-                color="total_revenue",
-                title="Paid Conversion by Acquisition Channel",
-                color_continuous_scale="Viridis",
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
-        with c2:
-            fig = px.pie(
-                plan_revenue,
-                names="plan_type",
-                values="revenue",
-                title="Revenue by Plan Type",
-                hole=0.45,
-                color_discrete_sequence=px.colors.qualitative.Set3,
-            )
-            st.plotly_chart(style_chart(fig), use_container_width=True)
+        payment_chart = payment.sort_values("payment_conversion_rate", ascending=True)
+        fig = px.bar(
+            payment_chart,
+            x="payment_conversion_rate",
+            y="acquisition_channel",
+            orientation="h",
+            text="payment_conversion_rate",
+            title="Paid Conversion by Channel",
+            color_discrete_sequence=["#2f80ed"],
+        )
+        fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
+        fig.update_xaxes(range=[0, max(45, float(payment_chart["payment_conversion_rate"].max()) + 8)], ticksuffix="%")
+        fig.update_layout(margin=dict(l=160, r=40, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=420), use_container_width=True)
+
+        plan_chart = plan_revenue.sort_values("revenue", ascending=True)
+        fig = px.bar(
+            plan_chart,
+            x="revenue",
+            y="plan_type",
+            orientation="h",
+            text="revenue",
+            title="Revenue by Plan",
+            color_discrete_sequence=["#27ae60"],
+        )
+        fig.update_traces(texttemplate="INR %{text:,.0f}", textposition="outside", cliponaxis=False)
+        fig.update_layout(margin=dict(l=110, r=70, t=56, b=32), showlegend=False)
+        st.plotly_chart(style_chart(fig, height=320), use_container_width=True)
 
         st.dataframe(payment, use_container_width=True, hide_index=True)
 
