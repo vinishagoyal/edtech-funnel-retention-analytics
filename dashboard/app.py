@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = BASE_DIR / "data" / "generated"
 
 
 st.set_page_config(
@@ -99,8 +100,220 @@ def style_chart(fig: go.Figure, height: int = 390) -> go.Figure:
     return fig
 
 
-def load_dashboard_data() -> dict[str, pd.DataFrame]:
+def conversion_frame(stages: list[tuple[str, int]]) -> pd.DataFrame:
+    rows = []
+    signup_users = stages[0][1] if stages else 0
+    previous_users = None
+    for stage, users in stages:
+        rows.append(
+            {
+                "funnel_stage": stage,
+                "user_count": users,
+                "conversion_from_previous_stage": round(100.0 * users / previous_users, 2) if previous_users else None,
+                "conversion_from_signup": round(100.0 * users / signup_users, 2) if signup_users else None,
+            }
+        )
+        previous_users = users
+    return pd.DataFrame(rows)
+
+
+def week_diff(event_dates: pd.Series, signup_weeks: pd.Series) -> pd.Series:
+    return ((event_dates.dt.normalize() - signup_weeks).dt.days // 7).astype("int64")
+
+
+def wait_bucket(seconds: pd.Series) -> pd.Series:
+    return pd.cut(
+        seconds,
+        bins=[-1, 60, 120, 180, 300, float("inf")],
+        labels=["0 to 60 sec", "61 to 120 sec", "121 to 180 sec", "181 to 300 sec", "300+ sec"],
+    )
+
+
+@st.cache_data(ttl=300)
+def load_csv_dashboard_data() -> dict[str, pd.DataFrame]:
+    required = ["users", "app_events", "questions", "sessions", "payments", "feedback"]
+    missing = [name for name in required if not (DATA_DIR / f"{name}.csv").exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing generated CSV files: "
+            + ", ".join(f"{name}.csv" for name in missing)
+            + ". Run python3 scripts/generate_synthetic_data.py first."
+        )
+
+    users = pd.read_csv(DATA_DIR / "users.csv", parse_dates=["signup_date"])
+    events = pd.read_csv(DATA_DIR / "app_events.csv", parse_dates=["event_time"])
+    questions = pd.read_csv(DATA_DIR / "questions.csv", parse_dates=["question_created_at"])
+    sessions = pd.read_csv(DATA_DIR / "sessions.csv", parse_dates=["session_start_time", "session_end_time"])
+    payments = pd.read_csv(DATA_DIR / "payments.csv", parse_dates=["payment_date"])
+    feedback = pd.read_csv(DATA_DIR / "feedback.csv", parse_dates=["feedback_created_at"])
+
+    signed_up = users[users["user_type"] == "signed_up"]
+    completed_sessions = sessions[sessions["session_status"] == "completed"]
+    completed_payments = payments[payments["payment_status"] == "completed"]
+    activated_users = questions["user_id"].nunique()
+    repeat_users = sessions.groupby("user_id").size().loc[lambda count: count >= 2].index.nunique()
+    paid_users = completed_payments["user_id"].nunique()
+    total_revenue = completed_payments["amount"].sum()
+
+    summary = pd.DataFrame(
+        [
+            {
+                "total_users": signed_up["user_id"].nunique(),
+                "activated_users": activated_users,
+                "total_sessions": sessions["session_id"].nunique(),
+                "completed_sessions": completed_sessions["session_id"].nunique(),
+                "activation_rate": round(100.0 * activated_users / max(signed_up["user_id"].nunique(), 1), 2),
+                "session_completion_rate": round(100.0 * len(completed_sessions) / max(len(sessions), 1), 2),
+                "repeat_usage_rate": round(100.0 * repeat_users / max(activated_users, 1), 2),
+                "paid_conversion_rate": round(100.0 * paid_users / max(signed_up["user_id"].nunique(), 1), 2),
+                "total_revenue": round(total_revenue, 2),
+                "arppu": round(total_revenue / paid_users, 2) if paid_users else 0,
+                "avg_wait_seconds": round(sessions["wait_time_seconds"].mean(), 0),
+                "avg_rating": round(feedback["rating"].mean(), 2),
+            }
+        ]
+    )
+
+    funnel = conversion_frame(
+        [
+            ("signed_up", signed_up["user_id"].nunique()),
+            ("onboarding_completed", events.loc[events["event_name"] == "onboarding_completed", "user_id"].nunique()),
+            ("question_submitted", events.loc[events["event_name"] == "question_submitted", "user_id"].nunique()),
+            ("tutor_connected", events.loc[events["event_name"] == "tutor_connected", "user_id"].nunique()),
+            ("session_completed", completed_sessions["user_id"].nunique()),
+            ("repeat_session", repeat_users),
+            ("payment_completed", paid_users),
+        ]
+    )
+
+    cohorts = signed_up[["user_id", "signup_date"]].copy()
+    cohorts["signup_week"] = cohorts["signup_date"].dt.to_period("W").dt.start_time
+    active_events = events[events["event_name"].isin(["app_opened", "question_submitted", "session_completed"])].merge(
+        cohorts[["user_id", "signup_week"]], on="user_id", how="inner"
+    )
+    active_events["active_week"] = week_diff(active_events["event_time"], active_events["signup_week"])
+    active_events = active_events[active_events["active_week"].between(0, 4)]
+    cohort_sizes = cohorts.groupby("signup_week")["user_id"].nunique().rename("cohort_users")
+    retention_rows = []
+    for signup_week, cohort_users in cohort_sizes.items():
+        row = {"signup_week": signup_week.date(), "cohort_users": cohort_users}
+        cohort_activity = active_events[active_events["signup_week"] == signup_week]
+        for week in range(5):
+            active_users = cohort_activity.loc[cohort_activity["active_week"] == week, "user_id"].nunique()
+            row[f"week_{week}"] = round(100.0 * active_users / cohort_users, 2) if cohort_users else 0
+        retention_rows.append(row)
+    retention = pd.DataFrame(retention_rows)
+
+    subject_joined = questions.merge(sessions, on="question_id", how="left").merge(feedback[["session_id", "rating"]], on="session_id", how="left")
+    subject = (
+        subject_joined.groupby("subject")
+        .agg(
+            total_questions=("question_id", "nunique"),
+            completed_sessions=("session_id", lambda value: subject_joined.loc[value.index, "session_status"].eq("completed").sum()),
+            avg_rating=("rating", "mean"),
+        )
+        .reset_index()
+    )
+    subject["completion_rate"] = (100.0 * subject["completed_sessions"] / subject["total_questions"]).round(2)
+    subject["avg_rating"] = subject["avg_rating"].round(2)
+    subject = subject.sort_values("total_questions", ascending=False)
+
+    wait_sessions = sessions.copy()
+    wait_sessions["wait_time_bucket"] = wait_bucket(wait_sessions["wait_time_seconds"])
+    wait_joined = wait_sessions.merge(feedback[["session_id", "rating"]], on="session_id", how="left")
+    wait_time = (
+        wait_joined.groupby("wait_time_bucket", observed=False)
+        .agg(
+            total_sessions=("session_id", "count"),
+            completed_sessions=("session_status", lambda value: value.eq("completed").sum()),
+            abandoned_sessions=("session_status", lambda value: value.ne("completed").sum()),
+            avg_feedback_rating=("rating", "mean"),
+        )
+        .reset_index()
+    )
+    wait_time["completion_rate"] = (100.0 * wait_time["completed_sessions"] / wait_time["total_sessions"]).round(2)
+    wait_time["abandonment_rate"] = (100.0 * wait_time["abandoned_sessions"] / wait_time["total_sessions"]).round(2)
+    wait_time["avg_feedback_rating"] = wait_time["avg_feedback_rating"].round(2)
+
+    payment = users.merge(payments, on="user_id", how="left")
+    payment = (
+        payment.groupby("acquisition_channel")
+        .agg(
+            total_users=("user_id", "nunique"),
+            paid_users=("payment_status", lambda value: payment.loc[value.index].query("payment_status == 'completed'")["user_id"].nunique()),
+            total_revenue=("amount", lambda value: payment.loc[value.index].query("payment_status == 'completed'")["amount"].sum()),
+        )
+        .reset_index()
+    )
+    payment["payment_conversion_rate"] = (100.0 * payment["paid_users"] / payment["total_users"]).round(2)
+    payment["arppu"] = (payment["total_revenue"] / payment["paid_users"].replace(0, pd.NA)).round(2).fillna(0)
+    payment["total_revenue"] = payment["total_revenue"].round(2)
+    payment = payment.sort_values("payment_conversion_rate", ascending=False)
+
+    plan_revenue = (
+        completed_payments.groupby("plan_type")["amount"]
+        .sum()
+        .round(2)
+        .rename("revenue")
+        .reset_index()
+        .sort_values("revenue", ascending=False)
+    )
+
+    session_counts = sessions.groupby("user_id").agg(total_sessions=("session_id", "count"), completed_sessions=("session_status", lambda x: x.eq("completed").sum()))
+    signed_never_asked = signed_up[~signed_up["user_id"].isin(questions["user_id"])]["user_id"].nunique()
+    question_counts = questions.groupby("user_id").size()
+    asked_one = question_counts[question_counts == 1].index
+    no_completed = session_counts.reindex(asked_one).fillna(0)["completed_sessions"].eq(0).sum()
+    completed_one = session_counts["completed_sessions"].eq(1).sum()
+    payment_viewers = set(events.loc[events["event_name"] == "payment_page_viewed", "user_id"])
+    payers = set(completed_payments["user_id"])
+    churn = pd.DataFrame(
+        [
+            {"churn_segment": "Signed up, never asked question", "users": signed_never_asked},
+            {"churn_segment": "Asked one question, no completed session", "users": int(no_completed)},
+            {"churn_segment": "Completed one session, never returned", "users": int(completed_one)},
+            {"churn_segment": "Viewed payment page, did not pay", "users": len(payment_viewers - payers)},
+        ]
+    )
+
+    acquisition = (
+        users.groupby("acquisition_channel")
+        .agg(users=("user_id", "count"), signed_up_users=("user_type", lambda value: value.eq("signed_up").sum()))
+        .reset_index()
+    )
+    acquisition["signup_rate"] = (100.0 * acquisition["signed_up_users"] / acquisition["users"]).round(2)
+    acquisition = acquisition.sort_values("users", ascending=False)
+
+    event_trend = events.copy()
+    event_trend["event_week"] = event_trend["event_time"].dt.to_period("W").dt.start_time.dt.date
+    event_trend = (
+        event_trend.pivot_table(index="event_week", columns="event_name", values="event_id", aggfunc="count", fill_value=0)
+        .reset_index()
+        .rename_axis(None, axis=1)
+    )
+    for column in ["app_opened", "question_submitted", "session_completed", "payment_completed"]:
+        if column not in event_trend:
+            event_trend[column] = 0
+    event_trend = event_trend[["event_week", "app_opened", "question_submitted", "session_completed", "payment_completed"]]
+    event_trend = event_trend.rename(columns={"app_opened": "app_opens", "question_submitted": "questions_submitted", "session_completed": "sessions_completed", "payment_completed": "payments_completed"})
+
     return {
+        "summary": summary,
+        "funnel": funnel,
+        "retention": retention,
+        "subject": subject,
+        "wait_time": wait_time,
+        "payment": payment,
+        "plan_revenue": plan_revenue,
+        "churn": churn,
+        "acquisition": acquisition,
+        "event_trend": event_trend,
+        "source": pd.DataFrame([{"name": "Generated CSV fallback"}]),
+    }
+
+
+def load_dashboard_data() -> dict[str, pd.DataFrame]:
+    data = {
         "summary": query(
             """
             WITH base AS (
@@ -236,26 +449,29 @@ def load_dashboard_data() -> dict[str, pd.DataFrame]:
             """
         ),
     }
+    data["source"] = pd.DataFrame([{"name": "PostgreSQL"}])
+    return data
 
 
 def main() -> None:
     st.title("EdTech Product Analytics Dashboard")
-    st.caption("Synthetic PostgreSQL dashboard for funnel, retention, tutor supply, session quality, and monetization analysis.")
+    st.caption("Synthetic product analytics dashboard for funnel, retention, tutor supply, session quality, and monetization analysis.")
 
     try:
         data = load_dashboard_data()
-    except SQLAlchemyError as exc:
-        st.error("Could not connect to PostgreSQL or query the analytics views.")
-        st.code(
-            "docker compose up -d\n"
-            "cp .env.example .env\n"
-            "python scripts/generate_synthetic_data.py\n"
-            "python scripts/load_data.py\n"
-            "streamlit run dashboard/app.py",
-            language="bash",
-        )
-        st.exception(exc)
-        st.stop()
+    except SQLAlchemyError:
+        try:
+            data = load_csv_dashboard_data()
+            st.info("PostgreSQL is not reachable, so this dashboard is using generated CSV files.")
+        except FileNotFoundError as exc:
+            st.error("Could not connect to PostgreSQL, and generated CSV files are missing.")
+            st.code(
+                "python3 scripts/generate_synthetic_data.py\n"
+                "python3 -m streamlit run dashboard/app.py",
+                language="bash",
+            )
+            st.exception(exc)
+            st.stop()
 
     summary = data["summary"]
     if summary.empty:
@@ -279,7 +495,7 @@ def main() -> None:
         st.metric("Completed Sessions", metric_value(int(row["completed_sessions"])))
         st.metric("Total Revenue", format_inr(row["total_revenue"]))
         st.divider()
-        st.write("Data source: local PostgreSQL")
+        st.write(f"Data source: {data['source'].iloc[0]['name']}")
         st.write("Refresh cache every 5 minutes")
 
     st.subheader("Executive Summary")
