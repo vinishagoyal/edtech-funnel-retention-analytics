@@ -293,6 +293,21 @@ def load_csv_dashboard_data() -> dict[str, pd.DataFrame]:
     acquisition["signup_rate"] = (100.0 * acquisition["signed_up_users"] / acquisition["users"]).round(2)
     acquisition = acquisition.sort_values("users", ascending=False)
 
+    signed_up_breakdown = (
+        signed_up.groupby("acquisition_channel")["user_id"]
+        .nunique()
+        .rename("signed_up_users")
+        .reset_index()
+        .sort_values("signed_up_users", ascending=False)
+    )
+    session_status_breakdown = (
+        sessions.groupby("session_status")["session_id"]
+        .nunique()
+        .rename("sessions")
+        .reset_index()
+        .sort_values("sessions", ascending=False)
+    )
+
     event_trend = events.copy()
     event_trend["event_week"] = event_trend["event_time"].dt.to_period("W").dt.start_time.dt.date
     event_trend = (
@@ -316,6 +331,8 @@ def load_csv_dashboard_data() -> dict[str, pd.DataFrame]:
         "plan_revenue": plan_revenue,
         "churn": churn,
         "acquisition": acquisition,
+        "signed_up_breakdown": signed_up_breakdown,
+        "session_status_breakdown": session_status_breakdown,
         "event_trend": event_trend,
         "source": pd.DataFrame([{"name": "Generated CSV fallback"}]),
     }
@@ -395,6 +412,23 @@ def load_dashboard_data() -> dict[str, pd.DataFrame]:
             WHERE payment_status = 'completed'
             GROUP BY plan_type
             ORDER BY revenue DESC;
+            """
+        ),
+        "signed_up_breakdown": query(
+            """
+            SELECT acquisition_channel, COUNT(DISTINCT user_id) AS signed_up_users
+            FROM users
+            WHERE user_type = 'signed_up'
+            GROUP BY acquisition_channel
+            ORDER BY signed_up_users DESC;
+            """
+        ),
+        "session_status_breakdown": query(
+            """
+            SELECT session_status, COUNT(DISTINCT session_id) AS sessions
+            FROM sessions
+            GROUP BY session_status
+            ORDER BY sessions DESC;
             """
         ),
         "churn": query(
@@ -495,13 +529,34 @@ def main() -> None:
     plan_revenue = data["plan_revenue"]
     churn = data["churn"]
     acquisition = data["acquisition"]
+    signed_up_breakdown = data["signed_up_breakdown"]
+    session_status_breakdown = data["session_status_breakdown"]
     event_trend = data["event_trend"]
 
     with st.sidebar:
         st.header("Dashboard Context")
         st.metric("Signed-up Users", metric_value(int(row["total_users"])))
+        with st.expander("Open Signed-up Users"):
+            signed_up_table = signed_up_breakdown.rename(
+                columns={"acquisition_channel": "Channel", "signed_up_users": "Users"}
+            )
+            st.dataframe(signed_up_table, use_container_width=True, hide_index=True)
+
         st.metric("Completed Sessions", metric_value(int(row["completed_sessions"])))
+        with st.expander("Open Completed Sessions"):
+            session_table = session_status_breakdown.rename(
+                columns={"session_status": "Status", "sessions": "Sessions"}
+            )
+            session_table["Status"] = session_table["Status"].map(clean_label)
+            st.dataframe(session_table, use_container_width=True, hide_index=True)
+
         st.metric("Total Revenue", format_inr(row["total_revenue"]))
+        with st.expander("Open Total Revenue"):
+            revenue_table = plan_revenue.copy().rename(columns={"plan_type": "Plan", "revenue": "Revenue"})
+            revenue_table["Plan"] = revenue_table["Plan"].map(clean_label)
+            revenue_table["Revenue"] = revenue_table["Revenue"].map(format_inr)
+            st.dataframe(revenue_table, use_container_width=True, hide_index=True)
+
         st.divider()
         st.write(f"Data source: {data['source'].iloc[0]['name']}")
         st.write("Refresh cache every 5 minutes")
