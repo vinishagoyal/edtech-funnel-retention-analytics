@@ -109,6 +109,14 @@ def clean_label(value: str) -> str:
     return value.replace("_", " ").title()
 
 
+def search_table(df: pd.DataFrame, search_text: str) -> pd.DataFrame:
+    if not search_text:
+        return df
+    text_columns = df.astype(str)
+    mask = text_columns.apply(lambda column: column.str.contains(search_text, case=False, na=False)).any(axis=1)
+    return df[mask]
+
+
 def conversion_frame(stages: list[tuple[str, int]]) -> pd.DataFrame:
     rows = []
     signup_users = stages[0][1] if stages else 0
@@ -334,6 +342,14 @@ def load_csv_dashboard_data() -> dict[str, pd.DataFrame]:
         "signed_up_breakdown": signed_up_breakdown,
         "session_status_breakdown": session_status_breakdown,
         "event_trend": event_trend,
+        "raw_tables": {
+            "users": users,
+            "app_events": events,
+            "questions": questions,
+            "sessions": sessions,
+            "payments": payments,
+            "feedback": feedback,
+        },
         "source": pd.DataFrame([{"name": "Generated CSV fallback"}]),
     }
 
@@ -492,6 +508,14 @@ def load_dashboard_data() -> dict[str, pd.DataFrame]:
             """
         ),
     }
+    data["raw_tables"] = {
+        "users": query("SELECT * FROM users;"),
+        "app_events": query("SELECT * FROM app_events;"),
+        "questions": query("SELECT * FROM questions;"),
+        "sessions": query("SELECT * FROM sessions;"),
+        "payments": query("SELECT * FROM payments;"),
+        "feedback": query("SELECT * FROM feedback;"),
+    }
     data["source"] = pd.DataFrame([{"name": "PostgreSQL"}])
     return data
 
@@ -532,6 +556,7 @@ def main() -> None:
     signed_up_breakdown = data["signed_up_breakdown"]
     session_status_breakdown = data["session_status_breakdown"]
     event_trend = data["event_trend"]
+    raw_tables = data["raw_tables"]
 
     with st.sidebar:
         st.header("Dashboard Context")
@@ -571,8 +596,8 @@ def main() -> None:
     kpi_cols[1].metric("ARPPU", format_inr(row["arppu"]))
     kpi_cols[2].metric("Avg Rating", metric_value(float(row["avg_rating"])))
 
-    tab_overview, tab_details, tab_funnel, tab_retention, tab_supply, tab_revenue = st.tabs(
-        ["Overview", "Metric Details", "Funnel", "Retention", "Supply & Quality", "Revenue"]
+    tab_overview, tab_details, tab_query, tab_funnel, tab_retention, tab_supply, tab_revenue = st.tabs(
+        ["Overview", "Metric Details", "Search & Query", "Funnel", "Retention", "Supply & Quality", "Revenue"]
     )
 
     with tab_overview:
@@ -722,6 +747,49 @@ def main() -> None:
         st.dataframe(revenue_table, use_container_width=True, hide_index=True)
         top_plan = revenue_detail.iloc[0]
         st.info(f"{top_plan['Plan']} is the largest revenue plan at {format_inr(top_plan['revenue'])}.")
+
+    with tab_query:
+        st.subheader("Search & Query Data")
+        st.write("Search the generated CSV-backed tables directly. No database server is required.")
+
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            selected_table = st.selectbox("Table", list(raw_tables.keys()))
+        with c2:
+            max_rows = st.number_input("Rows to show", min_value=10, max_value=1000, value=100, step=10)
+
+        selected_df = raw_tables[selected_table].copy()
+        search_text = st.text_input("Search text", placeholder="Example: Organic, Math, completed, weekly")
+        filtered_df = search_table(selected_df, search_text.strip())
+
+        filter_expression = st.text_input(
+            "Optional filter expression",
+            placeholder="Example: acquisition_channel == 'Organic' or amount > 500",
+        )
+        if filter_expression.strip():
+            try:
+                filtered_df = filtered_df.query(filter_expression)
+            except Exception as exc:
+                st.warning(f"Filter could not be applied: {exc}")
+
+        st.caption(f"{len(filtered_df):,} matching rows from {len(selected_df):,} total rows.")
+        st.dataframe(filtered_df.head(int(max_rows)), use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download result as CSV",
+            data=filtered_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{selected_table}_query_result.csv",
+            mime="text/csv",
+        )
+
+        with st.expander("Example filter expressions"):
+            st.code(
+                "acquisition_channel == 'Organic'\n"
+                "subject == 'Math'\n"
+                "session_status == 'completed'\n"
+                "amount > 500\n"
+                "payment_status == 'completed' and plan_type == 'monthly'",
+                language="text",
+            )
 
     with tab_funnel:
         funnel_chart = funnel.copy()
