@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data" / "generated"
+FIRST_NAMES = ["Aarav", "Aditi", "Anaya", "Arjun", "Diya", "Ishaan", "Kabir", "Meera", "Neha", "Rohan", "Saanvi", "Vihaan"]
+LAST_NAMES = ["Agarwal", "Bansal", "Gupta", "Iyer", "Jain", "Kapoor", "Mehta", "Nair", "Reddy", "Sharma", "Singh", "Verma"]
 
 
 st.set_page_config(
@@ -115,6 +118,84 @@ def search_table(df: pd.DataFrame, search_text: str) -> pd.DataFrame:
     text_columns = df.astype(str)
     mask = text_columns.apply(lambda column: column.str.contains(search_text, case=False, na=False)).any(axis=1)
     return df[mask]
+
+
+def student_name(user_id: str) -> str:
+    digest = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
+    first = FIRST_NAMES[int(digest[:4], 16) % len(FIRST_NAMES)]
+    last = LAST_NAMES[int(digest[4:8], 16) % len(LAST_NAMES)]
+    return f"{first} {last}"
+
+
+def completed_session_details(raw_tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    users = raw_tables["users"]
+    questions = raw_tables["questions"]
+    sessions = raw_tables["sessions"]
+    feedback = raw_tables["feedback"]
+
+    completed = sessions[sessions["session_status"] == "completed"].copy()
+    details = (
+        completed.merge(users, on="user_id", how="left")
+        .merge(questions[["question_id", "subject", "difficulty_level", "source"]], on="question_id", how="left")
+        .merge(feedback[["session_id", "rating"]], on="session_id", how="left")
+    )
+    details["Student Name"] = details["user_id"].map(student_name)
+    details["Student ID"] = details["user_id"].astype(str).str.slice(0, 8)
+    details["Course"] = details["subject"]
+    details["Session Date"] = pd.to_datetime(details["session_start_time"]).dt.date
+    details["Rating"] = details["rating"].fillna("No feedback")
+    return details[
+        [
+            "Student Name",
+            "Student ID",
+            "grade",
+            "city",
+            "acquisition_channel",
+            "Course",
+            "difficulty_level",
+            "source",
+            "Session Date",
+            "wait_time_seconds",
+            "session_duration_minutes",
+            "Rating",
+            "session_id",
+        ]
+    ].rename(
+        columns={
+            "grade": "Grade",
+            "city": "City",
+            "acquisition_channel": "Channel",
+            "difficulty_level": "Difficulty",
+            "source": "Source",
+            "wait_time_seconds": "Wait Seconds",
+            "session_duration_minutes": "Duration Minutes",
+            "session_id": "Session ID",
+        }
+    )
+
+
+def infer_query_filters(query_text: str, details: pd.DataFrame) -> tuple[str, str, str]:
+    text_value = query_text.lower()
+    grade = "All"
+    course = "All"
+    channel = "All"
+
+    for value in sorted(details["Grade"].dropna().unique(), key=str, reverse=True):
+        if str(value).lower() in text_value:
+            grade = value
+            break
+
+    for value in sorted(details["Course"].dropna().unique(), key=str, reverse=True):
+        if str(value).lower() in text_value:
+            course = value
+            break
+
+    for value in sorted(details["Channel"].dropna().unique(), key=str, reverse=True):
+        if str(value).lower() in text_value:
+            channel = value
+            break
+
+    return grade, course, channel
 
 
 def conversion_frame(stages: list[tuple[str, int]]) -> pd.DataFrame:
@@ -749,47 +830,75 @@ def main() -> None:
         st.info(f"{top_plan['Plan']} is the largest revenue plan at {format_inr(top_plan['revenue'])}.")
 
     with tab_query:
-        st.subheader("Search & Query Data")
-        st.write("Search the generated CSV-backed tables directly. No database server is required.")
+        st.subheader("Ask About Completed Sessions")
+        st.write("Ask how many students completed sessions, then filter by grade, course, or acquisition channel.")
 
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            selected_table = st.selectbox("Table", list(raw_tables.keys()))
-        with c2:
-            max_rows = st.number_input("Rows to show", min_value=10, max_value=1000, value=100, step=10)
-
-        selected_df = raw_tables[selected_table].copy()
-        search_text = st.text_input("Search text", placeholder="Example: Organic, Math, completed, weekly")
-        filtered_df = search_table(selected_df, search_text.strip())
-
-        filter_expression = st.text_input(
-            "Optional filter expression",
-            placeholder="Example: acquisition_channel == 'Organic' or amount > 500",
+        completed_details = completed_session_details(raw_tables)
+        user_query = st.text_input(
+            "Question",
+            value="How many students completed sessions for Grade 10 Math?",
+            placeholder="Example: how many students completed sessions for Grade 10 Math",
         )
-        if filter_expression.strip():
-            try:
-                filtered_df = filtered_df.query(filter_expression)
-            except Exception as exc:
-                st.warning(f"Filter could not be applied: {exc}")
+        inferred_grade, inferred_course, inferred_channel = infer_query_filters(user_query, completed_details)
 
-        st.caption(f"{len(filtered_df):,} matching rows from {len(selected_df):,} total rows.")
-        st.dataframe(filtered_df.head(int(max_rows)), use_container_width=True, hide_index=True)
+        grade_options = ["All"] + sorted(completed_details["Grade"].dropna().unique().tolist())
+        course_options = ["All"] + sorted(completed_details["Course"].dropna().unique().tolist())
+        channel_options = ["All"] + sorted(completed_details["Channel"].dropna().unique().tolist())
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            selected_grade = st.selectbox("Grade", grade_options, index=grade_options.index(inferred_grade))
+        with c2:
+            selected_course = st.selectbox("Course", course_options, index=course_options.index(inferred_course))
+        with c3:
+            selected_channel = st.selectbox("Channel", channel_options, index=channel_options.index(inferred_channel))
+
+        result = completed_details.copy()
+        if selected_grade != "All":
+            result = result[result["Grade"] == selected_grade]
+        if selected_course != "All":
+            result = result[result["Course"] == selected_course]
+        if selected_channel != "All":
+            result = result[result["Channel"] == selected_channel]
+
+        unique_students = result["Student ID"].nunique()
+        completed_sessions_count = result["Session ID"].nunique()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Students", metric_value(unique_students))
+        c2.metric("Completed Sessions", metric_value(completed_sessions_count))
+        c3.metric("Average Rating", metric_value(pd.to_numeric(result["Rating"], errors="coerce").mean()))
+
+        st.dataframe(result.head(250), use_container_width=True, hide_index=True)
         st.download_button(
-            "Download result as CSV",
-            data=filtered_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"{selected_table}_query_result.csv",
+            "Download completed-session result",
+            data=result.to_csv(index=False).encode("utf-8"),
+            file_name="completed_session_query_result.csv",
             mime="text/csv",
         )
 
-        with st.expander("Example filter expressions"):
-            st.code(
-                "acquisition_channel == 'Organic'\n"
-                "subject == 'Math'\n"
-                "session_status == 'completed'\n"
-                "amount > 500\n"
-                "payment_status == 'completed' and plan_type == 'monthly'",
-                language="text",
+        with st.expander("Advanced table search"):
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                selected_table = st.selectbox("Table", list(raw_tables.keys()))
+            with c2:
+                max_rows = st.number_input("Rows to show", min_value=10, max_value=1000, value=100, step=10)
+
+            selected_df = raw_tables[selected_table].copy()
+            search_text = st.text_input("Search text", placeholder="Example: Organic, Math, completed, weekly")
+            filtered_df = search_table(selected_df, search_text.strip())
+
+            filter_expression = st.text_input(
+                "Optional filter expression",
+                placeholder="Example: acquisition_channel == 'Organic' or amount > 500",
             )
+            if filter_expression.strip():
+                try:
+                    filtered_df = filtered_df.query(filter_expression)
+                except Exception as exc:
+                    st.warning(f"Filter could not be applied: {exc}")
+
+            st.caption(f"{len(filtered_df):,} matching rows from {len(selected_df):,} total rows.")
+            st.dataframe(filtered_df.head(int(max_rows)), use_container_width=True, hide_index=True)
 
     with tab_funnel:
         funnel_chart = funnel.copy()
