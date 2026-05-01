@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -127,6 +128,33 @@ def student_name(user_id: str) -> str:
     return f"{first} {last}"
 
 
+@st.cache_resource
+def build_sqlite_database(raw_tables: dict[str, pd.DataFrame]) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    for table_name, df in raw_tables.items():
+        table_df = df.copy()
+        if table_name == "users":
+            table_df["student_name"] = table_df["user_id"].map(student_name)
+            table_df["student_short_id"] = table_df["user_id"].astype(str).str.slice(0, 8)
+        table_df.to_sql(table_name, conn, index=False, if_exists="replace")
+    return conn
+
+
+def is_read_only_sql(sql: str) -> bool:
+    normalized = sql.strip().lower()
+    blocked = ["insert", "update", "delete", "drop", "alter", "create", "replace", "truncate", "attach", "detach", "pragma"]
+    return (normalized.startswith("select") or normalized.startswith("with")) and not any(
+        f"{word} " in normalized or normalized == word for word in blocked
+    )
+
+
+def run_sql_query(raw_tables: dict[str, pd.DataFrame], sql: str) -> pd.DataFrame:
+    if not is_read_only_sql(sql):
+        raise ValueError("Only read-only SELECT queries are allowed.")
+    conn = build_sqlite_database(raw_tables)
+    return pd.read_sql_query(sql, conn)
+
+
 def completed_session_details(raw_tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     users = raw_tables["users"]
     questions = raw_tables["questions"]
@@ -200,7 +228,61 @@ def infer_query_filters(query_text: str, details: pd.DataFrame) -> tuple[str, st
 
 def render_query_tool(raw_tables: dict[str, pd.DataFrame]) -> None:
     st.subheader("Query Tool")
-    st.write("Ask how many students completed sessions, then review the student, course, and session details.")
+    st.write("Write SQL queries against the generated CSV data. No external database is required.")
+
+    default_sql = """SELECT
+    u.student_name,
+    u.student_short_id,
+    u.grade,
+    u.city,
+    q.subject AS course,
+    q.difficulty_level,
+    s.session_start_time,
+    s.wait_time_seconds,
+    s.session_duration_minutes,
+    f.rating
+FROM sessions s
+JOIN users u ON s.user_id = u.user_id
+JOIN questions q ON s.question_id = q.question_id
+LEFT JOIN feedback f ON s.session_id = f.session_id
+WHERE s.session_status = 'completed'
+  AND u.grade = 'Grade 10'
+  AND q.subject = 'Math'
+ORDER BY s.session_start_time
+LIMIT 100;"""
+
+    sql = st.text_area("SQL query", value=default_sql, height=300)
+    run_query = st.button("Run SQL Query", type="primary")
+
+    with st.expander("Available tables and useful columns"):
+        st.markdown(
+            """
+            - `users`: `user_id`, `student_name`, `student_short_id`, `grade`, `city`, `acquisition_channel`, `device_type`
+            - `questions`: `question_id`, `user_id`, `subject`, `difficulty_level`, `source`, `question_status`
+            - `sessions`: `session_id`, `user_id`, `question_id`, `session_status`, `wait_time_seconds`, `session_duration_minutes`
+            - `feedback`: `feedback_id`, `session_id`, `user_id`, `rating`, `feedback_text`
+            - `payments`: `payment_id`, `user_id`, `amount`, `plan_type`, `payment_status`
+            - `app_events`: `event_id`, `user_id`, `event_name`, `event_time`, `device_type`
+            """
+        )
+
+    if run_query:
+        try:
+            sql_result = run_sql_query(raw_tables, sql)
+            st.caption(f"{len(sql_result):,} rows returned.")
+            st.dataframe(sql_result, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download SQL result",
+                data=sql_result.to_csv(index=False).encode("utf-8"),
+                file_name="sql_query_result.csv",
+                mime="text/csv",
+            )
+        except Exception as exc:
+            st.error(f"Query failed: {exc}")
+
+    st.divider()
+    st.subheader("Guided Completed Session Query")
+    st.write("Use filters to answer the common completed-session question without writing SQL.")
 
     completed_details = completed_session_details(raw_tables)
     user_query = st.text_input(
