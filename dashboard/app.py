@@ -128,15 +128,20 @@ def student_name(user_id: str) -> str:
     return f"{first} {last}"
 
 
+def add_student_display_columns(df: pd.DataFrame) -> pd.DataFrame:
+    display_df = df.copy()
+    if "user_id" not in display_df.columns:
+        return display_df
+    display_df.insert(0, "student_name", display_df["user_id"].map(student_name))
+    display_df.insert(1, "student_short_id", display_df["user_id"].astype(str).str.slice(0, 8))
+    return display_df
+
+
 @st.cache_resource
 def build_sqlite_database(raw_tables: dict[str, pd.DataFrame]) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     for table_name, df in raw_tables.items():
-        table_df = df.copy()
-        if table_name == "users":
-            table_df["student_name"] = table_df["user_id"].map(student_name)
-            table_df["student_short_id"] = table_df["user_id"].astype(str).str.slice(0, 8)
-        table_df.to_sql(table_name, conn, index=False, if_exists="replace")
+        add_student_display_columns(df).to_sql(table_name, conn, index=False, if_exists="replace")
     return conn
 
 
@@ -168,14 +173,16 @@ def completed_session_details(raw_tables: dict[str, pd.DataFrame]) -> pd.DataFra
         .merge(feedback[["session_id", "rating"]], on="session_id", how="left")
     )
     details["Student Name"] = details["user_id"].map(student_name)
-    details["Student ID"] = details["user_id"].astype(str).str.slice(0, 8)
+    details["_student_id"] = details["user_id"]
+    details["_session_id"] = details["session_id"]
     details["Course"] = details["subject"]
     details["Session Date"] = pd.to_datetime(details["session_start_time"]).dt.date
     details["Rating"] = details["rating"].fillna("No feedback")
     return details[
         [
             "Student Name",
-            "Student ID",
+            "_student_id",
+            "_session_id",
             "grade",
             "city",
             "acquisition_channel",
@@ -186,7 +193,6 @@ def completed_session_details(raw_tables: dict[str, pd.DataFrame]) -> pd.DataFra
             "wait_time_seconds",
             "session_duration_minutes",
             "Rating",
-            "session_id",
         ]
     ].rename(
         columns={
@@ -197,7 +203,6 @@ def completed_session_details(raw_tables: dict[str, pd.DataFrame]) -> pd.DataFra
             "source": "Source",
             "wait_time_seconds": "Wait Seconds",
             "session_duration_minutes": "Duration Minutes",
-            "session_id": "Session ID",
         }
     )
 
@@ -232,7 +237,6 @@ def render_query_tool(raw_tables: dict[str, pd.DataFrame]) -> None:
 
     default_sql = """SELECT
     u.student_name,
-    u.student_short_id,
     u.grade,
     u.city,
     q.subject AS course,
@@ -257,12 +261,12 @@ LIMIT 100;"""
     with st.expander("Available tables and useful columns"):
         st.markdown(
             """
-            - `users`: `user_id`, `student_name`, `student_short_id`, `grade`, `city`, `acquisition_channel`, `device_type`
-            - `questions`: `question_id`, `user_id`, `subject`, `difficulty_level`, `source`, `question_status`
-            - `sessions`: `session_id`, `user_id`, `question_id`, `session_status`, `wait_time_seconds`, `session_duration_minutes`
-            - `feedback`: `feedback_id`, `session_id`, `user_id`, `rating`, `feedback_text`
-            - `payments`: `payment_id`, `user_id`, `amount`, `plan_type`, `payment_status`
-            - `app_events`: `event_id`, `user_id`, `event_name`, `event_time`, `device_type`
+            - `users`: `student_name`, `grade`, `city`, `acquisition_channel`, `device_type`
+            - `questions`: `student_name`, `subject`, `difficulty_level`, `source`, `question_status`
+            - `sessions`: `student_name`, `session_status`, `wait_time_seconds`, `session_duration_minutes`
+            - `feedback`: `student_name`, `rating`, `feedback_text`
+            - `payments`: `student_name`, `amount`, `plan_type`, `payment_status`
+            - `app_events`: `student_name`, `event_name`, `event_time`, `device_type`
             """
         )
 
@@ -312,17 +316,18 @@ LIMIT 100;"""
     if selected_channel != "All":
         result = result[result["Channel"] == selected_channel]
 
-    unique_students = result["Student ID"].nunique()
-    completed_sessions_count = result["Session ID"].nunique()
+    unique_students = result["_student_id"].nunique()
+    completed_sessions_count = result["_session_id"].nunique()
     c1, c2, c3 = st.columns(3)
     c1.metric("Students", metric_value(unique_students))
     c2.metric("Completed Sessions", metric_value(completed_sessions_count))
     c3.metric("Average Rating", metric_value(pd.to_numeric(result["Rating"], errors="coerce").mean()))
 
-    st.dataframe(result.head(250), use_container_width=True, hide_index=True)
+    display_result = result.drop(columns=["_student_id", "_session_id"])
+    st.dataframe(display_result.head(250), use_container_width=True, hide_index=True)
     st.download_button(
         "Download completed-session result",
-        data=result.to_csv(index=False).encode("utf-8"),
+        data=display_result.to_csv(index=False).encode("utf-8"),
         file_name="completed_session_query_result.csv",
         mime="text/csv",
     )
