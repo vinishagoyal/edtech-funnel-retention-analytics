@@ -847,8 +847,17 @@ def main() -> None:
     )
 
     with tab_overview:
-        trend_long = event_trend.melt(
-            id_vars="event_week",
+        event_trend_display = event_trend.copy()
+        event_trend_display["event_month"] = pd.to_datetime(event_trend_display["event_week"]).dt.strftime("%b %Y")
+        event_trend_display = (
+            event_trend_display.groupby("event_month", sort=False)[
+                ["app_opens", "questions_submitted", "sessions_completed", "payments_completed"]
+            ]
+            .sum()
+            .reset_index()
+        )
+        trend_long = event_trend_display.melt(
+            id_vars="event_month",
             value_vars=["app_opens", "questions_submitted", "sessions_completed", "payments_completed"],
             var_name="event_type",
             value_name="events",
@@ -863,14 +872,15 @@ def main() -> None:
         )
         fig = px.line(
             trend_long,
-            x="event_week",
+            x="event_month",
             y="events",
             color="event_type",
             markers=True,
-            title="Weekly Activity",
+            title="Monthly Activity",
             color_discrete_sequence=px.colors.qualitative.Set2,
         )
-        st.plotly_chart(style_chart(fig, height=460), use_container_width=True)
+        fig.update_xaxes(type="category", tickangle=0, tickmode="array", tickvals=event_trend_display["event_month"].tolist())
+        st.plotly_chart(style_chart(fig, height=430), use_container_width=True)
 
         acquisition_chart = acquisition.sort_values("users", ascending=True)
         fig = px.bar(
